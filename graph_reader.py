@@ -1,10 +1,16 @@
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-from pandas import value_counts
 from sklearn.cluster import KMeans
 from logging import Logger
 import os
+
+import pytesseract
+from pytesseract.pytesseract import Output
+
+from utils import is_number
+
+pytesseract.pytesseract.tesseract_cmd = "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 
 logger = Logger("Graph Reader", level="DEBUG")
 
@@ -13,16 +19,133 @@ class GraphReader:
     def __init__(self) -> None:
         self.source_name = None
 
-    def from_image(self, image_path, nb_points=100):
+    def from_image(
+        self,
+        image_path,
+        nb_points=100,
+        automatic_scale=True,
+        x_min_value=None,
+        x_max_value=None,
+        y_min_value=None,
+        y_max_value=None,
+    ):
+        self.x_min_value = x_min_value
+        self.x_max_value = x_max_value
+        self.y_min_value = y_min_value
+        self.y_max_value = y_max_value
+        self.automatic_scale = automatic_scale
         self.source_name = os.path.basename(image_path)
         self.color_image = cv2.imread(image_path)
-        self.curve_roi, self.x_axis_roi, self.y_axis_roi = self.get_all_rois()
+        # TODO check if there is a better way to manage this
+        self.roi_margin = self.color_image.shape[0] // 100
+        self.axis_margin = self.roi_margin * 2
+        self.curve_roi, self.x_axis_roi, self.y_axis_roi, self.title_roi = self.get_all_rois()
         self.nb_curves = self.get_curve_number()
         self.mask_curve_roi = self.compute_kmeans(self.curve_roi, self.nb_curves + 1, use_HSV=False)
         self.background_index = self.compute_bg_index()
         self.curves_index = sorted([i for i in np.unique(self.mask_curve_roi) if i != self.background_index])
-        self.read_curves(self.mask_curve_roi, nb_points)
+        if automatic_scale:
+            self.match_values_to_ticks()
+        self.read_curves(nb_points=nb_points)
         self.scale_results()
+
+    def display_graph(self):
+        for x, y in zip(self.x_points, self.y_points):
+            plt.scatter(x, y)
+        plt.show()
+
+    def detect_axis_ticks(self):
+        _, bw_x_axis = cv2.threshold(cv2.cvtColor(self.x_axis_roi, cv2.COLOR_BGR2GRAY), 50, 255, cv2.THRESH_BINARY)
+        _, bw_y_axis = cv2.threshold(cv2.cvtColor(self.y_axis_roi, cv2.COLOR_BGR2GRAY), 50, 255, cv2.THRESH_BINARY)
+        # check for ticks below the X-axis
+        x_ticks = self.get_ticks_indexes(bw_x_axis[int(self.axis_margin * 1.7)])
+        # if not found, check above the X-axis
+        if not x_ticks:
+            x_ticks = self.get_ticks_indexes(bw_x_axis[int(self.axis_margin * 0.7)])
+        if not x_ticks:
+            raise RuntimeError("No ticks could be detected around the X-axis, cannot compute the scale of the graph")
+
+        # check for ticks left of the Y-axis
+        print("y index", int(self.axis_margin * 1.3))
+        y_ticks = self.get_ticks_indexes(bw_y_axis[:, -int(self.axis_margin * 1.7)])
+        # if not found, check right of the Y-axis
+        if not y_ticks:
+            print('not found left')
+            y_ticks = self.get_ticks_indexes(bw_y_axis[:, -int(self.axis_margin * 0.7)])
+        if not y_ticks:
+            raise RuntimeError("No ticks could be detected around the Y-axis, cannot compute the scale of the graph")
+        return x_ticks, y_ticks
+
+    def get_ticks_indexes(self, line):
+        # Get black pixels on the given line
+        positive_matches = np.where(line == 0)[0]
+        # print(positive_matches)
+        if positive_matches.size > 0:
+            # Group consecutive index together as they are the same tick
+            grouped_matches = np.split(positive_matches, np.where(np.diff(positive_matches) != 1)[0] + 1)
+            # take the mean of each group to get the tick center position
+            grouped_matches = [int(np.mean(x)) for x in grouped_matches]
+        else:
+            grouped_matches = []
+        return grouped_matches
+
+    def detect_x_values(self):
+        scaling_ratio = 2
+        bigger = cv2.resize(self.x_axis_roi, np.array(self.x_axis_roi.shape[:2][::-1]) * scaling_ratio)
+        boxes = pytesseract.image_to_data(bigger, output_type=Output.DICT, config="--psm 6 digits")
+        x_axis_values, _ = self.process_tesseract_result(boxes, scaling_ratio)
+        return x_axis_values
+
+    def detect_y_values(self):
+        scaling_ratio = 2
+        bigger = cv2.resize(self.y_axis_roi, np.array(self.y_axis_roi.shape[:2][::-1]) * scaling_ratio)
+        # TODO vertical text is an issue, not sure how to remove it. Fixed value here is just working for this example
+        # boxes = pytesseract.image_to_data(bigger[:, 55:], output_type=Output.DICT, config="--psm 6 digits")
+        boxes = pytesseract.image_to_data(bigger[:, :], output_type=Output.DICT, config="--psm 6 digits")
+        y_axis_values, _ = self.process_tesseract_result(boxes, scaling_ratio)
+        return y_axis_values
+
+    def match_values_to_ticks(self):
+        x_ticks, y_ticks = self.detect_axis_ticks()
+        x_axis_values = self.detect_x_values()
+        y_axis_values = self.detect_y_values()
+        self.x_axis_matching = {}
+        self.y_axis_matching = {}
+        # find the closest tick to the center of the number
+        for val in x_axis_values:
+            self.x_axis_matching[val["value"]] = min(x_ticks, key=lambda x: abs(x - val["center_x"]))
+        for val in y_axis_values:
+            self.y_axis_matching[val["value"]] = min(y_ticks, key=lambda x: abs(x - val["center_y"]))
+
+    @staticmethod
+    def process_tesseract_result(boxes, scaling_ratio):
+        legend = []
+        axis_values = []
+
+        for txt, left, top, width, height in zip(
+            boxes["text"], boxes["left"], boxes["top"], boxes["width"], boxes["height"]
+        ):
+            if not txt or txt == " ":
+                continue
+            if is_number(txt):
+                # print("axis value", txt)
+                axis_values.append(
+                    {
+                        "value": float(txt),
+                        "center_x": (left + width / 2) / scaling_ratio,
+                        "center_y": (top + height / 2) / scaling_ratio,
+                    }
+                )
+            else:
+                # print("legend", txt)
+                legend.append(
+                    {
+                        "text": txt,
+                        "center_x": (left + width / 2) / scaling_ratio,
+                        "center_y": (top + height / 2) / scaling_ratio,
+                    }
+                )
+        return axis_values, legend
 
     def compute_bg_index(self):
         index_value_counts = [(self.mask_curve_roi == i).sum() for i in np.unique(self.mask_curve_roi)]
@@ -32,26 +155,54 @@ class GraphReader:
     def get_axis_scale(min_value, max_value, min_pixel, max_pixel):
         logger.debug(f"value min: {min_value} value max: {max_value}")
         logger.debug(f"pixel min: {min_pixel} pixel max: {max_pixel}")
-        return (max_value - min_value) / (max_pixel - min_pixel)
+        return abs(max_value - min_value) / abs(max_pixel - min_pixel)
 
-    def compute_axis_scales(self, x_min_value, x_max_value, y_min_value, y_max_value):
+    def get_min_max_values(self):
+        self.x_min_value = min(self.x_axis_matching.keys())
+        self.x_max_value = max(self.x_axis_matching.keys())
+        self.y_min_value = min(self.y_axis_matching.keys())
+        self.y_max_value = max(self.y_axis_matching.keys())
+
+    def get_min_max_pixels(self):
+        return (
+            self.x_axis_matching[self.x_min_value] - self.curve_roi_x_min - self.roi_margin,
+            self.x_axis_matching[self.x_max_value] - self.curve_roi_x_min - self.roi_margin,
+            self.y_axis_matching[self.y_min_value] - self.curve_roi_y_min - self.roi_margin,
+            self.y_axis_matching[self.y_max_value] - self.curve_roi_y_min - self.roi_margin,
+        )
+
+    def compute_axis_scales(self):
+        if self.automatic_scale:
+            self.get_min_max_values()
+            self.x_min_pixel, self.x_max_pixel, self.y_min_pixel, self.y_max_pixel = self.get_min_max_pixels()
+        elif (
+            self.x_max_value is None or self.x_min_value is None or self.y_min_value is None or self.y_max_value is None
+        ):
+            raise RuntimeError(
+                "When using manual scale, user needs to provide values for 'x_min_value', 'x_max_value', 'y_min_value',"
+                " 'y_max_value'"
+            )
+
+        # TODO manage different one per curve for mutliple curves
         grey_roi = cv2.cvtColor(self.curve_roi, cv2.COLOR_BGR2GRAY)
         _, black_and_white = cv2.threshold(grey_roi, 200, 255, cv2.THRESH_BINARY)
         binary_roi = cv2.bitwise_not(black_and_white)
         self.x_lower, self.y_lower, width, height = cv2.boundingRect(binary_roi)
         self.x_upper = self.x_lower + width
         self.y_upper = self.y_lower + height
-        self.x_scale = self.get_axis_scale(x_min_value, x_max_value, self.x_lower, self.x_upper)
-        self.y_scale = self.get_axis_scale(y_min_value, y_max_value, self.y_lower, self.y_upper)
+        self.x_scale = self.get_axis_scale(self.x_min_value, self.x_max_value, self.x_min_pixel, self.x_max_pixel)
+        self.y_scale = self.get_axis_scale(self.y_min_value, self.y_max_value, self.y_min_pixel, self.y_max_pixel)
 
-    def read_curves(self, mask_curve_roi, nb_points=100):
-        self.x_min_value, self.x_max_value = -np.pi, np.pi
-        self.y_min_value, self.y_max_value = -1, 1
-        self.compute_axis_scales(-np.pi, np.pi, -1, 1)
+    def read_curves(self, nb_points=100):
+        self.compute_axis_scales()
         # TODO there are weird effects on the edges of the curves. Check why in more details.
         # Here I just removed some extreme points but it's not a good solution
-        self.x_points = [np.linspace(self.x_lower + 2, self.x_upper - 3, nb_points) for _ in range(len(self.curves_index))]
-        self.y_points = [self.read_single_curve(self.mask_curve_roi == curve_id, i) for i, curve_id in enumerate(self.curves_index)]
+        self.x_points = [
+            np.linspace(self.x_lower + 2, self.x_upper - 3, nb_points) for _ in range(len(self.curves_index))
+        ]
+        self.y_points = [
+            self.read_single_curve(self.mask_curve_roi == curve_id, i) for i, curve_id in enumerate(self.curves_index)
+        ]
         self.filter_empty_points()
 
     def filter_empty_points(self):
@@ -61,7 +212,9 @@ class GraphReader:
             self.y_points[i] = self.y_points[i][mask]
 
     def read_single_curve(self, curve_binary_mask, points_index):
-        return np.array([self.get_curve_point_from_binary(image=curve_binary_mask, x=int(x)) for x in self.x_points[points_index]])
+        return np.array(
+            [self.get_curve_point_from_binary(image=curve_binary_mask, x=int(x)) for x in self.x_points[points_index]]
+        )
 
     @staticmethod
     def get_curve_point_from_binary(image, x):
@@ -74,8 +227,8 @@ class GraphReader:
 
     def scale_results(self):
         for i in range(len(self.x_points)):
-            self.x_points[i] = [(x - self.x_lower) * self.x_scale + self.x_min_value for x in self.x_points[i]]
-            self.y_points[i] = [(self.y_upper - y) * self.y_scale + self.y_min_value for y in self.y_points[i]]
+            self.x_points[i] = [(x - self.x_min_pixel) * self.x_scale + self.x_min_value for x in self.x_points[i]]
+            self.y_points[i] = [(self.y_min_pixel - y) * self.y_scale + self.y_min_value for y in self.y_points[i]]
 
     def get_all_rois(self):
 
@@ -92,16 +245,18 @@ class GraphReader:
             if len(approx) == 4 and cv2.contourArea(cnt) > min_area:
                 biggest_rectangle = np.squeeze(approx)
 
-        x_min, y_min = np.min(biggest_rectangle, axis=0)
-        x_max, y_max = np.max(biggest_rectangle, axis=0)
+        self.curve_roi_x_min, self.curve_roi_y_min = np.min(biggest_rectangle, axis=0)
+        self.curve_roi_x_max, self.curve_roi_y_max = np.max(biggest_rectangle, axis=0)
 
-        margin = 3
-        axis_margin = 5
-        curve_roi = self.color_image[y_min + margin : y_max - margin, x_min + margin : x_max - margin]
-        x_axis_roi = self.color_image[-(self.color_image.shape[0] - y_max) - axis_margin :, :]
-        y_axis_roi = self.color_image[:, : x_min + axis_margin]
+        curve_roi = self.color_image[
+            self.curve_roi_y_min + self.roi_margin : self.curve_roi_y_max - self.roi_margin,
+            self.curve_roi_x_min + self.roi_margin : self.curve_roi_x_max - self.roi_margin,
+        ]
+        x_axis_roi = self.color_image[-(self.color_image.shape[0] - self.curve_roi_y_max) - self.axis_margin :, :]
+        y_axis_roi = self.color_image[:, : self.curve_roi_x_min + self.axis_margin]
+        title_roi = self.color_image[: self.curve_roi_y_min, :]
 
-        return curve_roi, x_axis_roi, y_axis_roi
+        return curve_roi, x_axis_roi, y_axis_roi, title_roi
 
     @staticmethod
     def compute_kmeans(curve_roi, nb_clusters, use_HSV=False):

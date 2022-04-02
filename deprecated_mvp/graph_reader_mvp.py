@@ -31,8 +31,8 @@ def main_v0(image, x_min_value, x_max_value, y_min_value, y_max_value, nb_points
     y_scale = get_axis_scale(y_min_value, y_max_value, y_lower, y_upper)
     x_points = np.linspace(x_lower, x_upper - 1, nb_points)
     # print("X points", x_points)
-    logger.debug(f"Scale coefficient X-axis: {x_scale}")
-    logger.debug(f"Scale coefficient Y-axis: {x_scale}")
+    print(f"Scale coefficient X-axis: {x_scale}")
+    print(f"Scale coefficient Y-axis: {y_scale}")
     y_points = np.array([get_curve_point(image=grey_roi, x=int(x)) for x in x_points])
 
     return (
