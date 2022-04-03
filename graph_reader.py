@@ -44,21 +44,30 @@ class GraphReader:
         self.mask_curve_roi = self.compute_kmeans(self.curve_roi, self.nb_curves + 1, use_HSV=False)
         self.background_index = self.compute_bg_index()
         self.curves_index = sorted([i for i in np.unique(self.mask_curve_roi) if i != self.background_index])
+        self.get_curve_colors()
         if automatic_scale:
             self.match_values_to_ticks()
         self.read_curves(nb_points=nb_points)
         self.scale_results()
 
     def display_graph(self):
-        for x, y in zip(self.x_points, self.y_points):
-            plt.scatter(x, y)
+        for x, y, color in zip(self.x_points, self.y_points, self.curves_color):
+            # Matplotlib needs the color in RGB between 0-1 and as many times as there are points
+            plt.scatter(x, y, color=color/255, s=4)
         plt.show()
+    
+    def get_curve_colors(self):
+        self.curves_color = []
+        for curve_id in self.curves_index:
+            color = np.mean(self.curve_roi[self.mask_curve_roi == curve_id], axis = 0)
+            # as OpenCV uses BGR format, the color table needs to be reversed to match RGB used by matplotlib
+            self.curves_color.append(color[::-1])
 
     def detect_axis_ticks(self):
-        _, bw_x_axis = cv2.threshold(cv2.cvtColor(self.x_axis_roi, cv2.COLOR_BGR2GRAY), 50, 255, cv2.THRESH_BINARY)
-        _, bw_y_axis = cv2.threshold(cv2.cvtColor(self.y_axis_roi, cv2.COLOR_BGR2GRAY), 50, 255, cv2.THRESH_BINARY)
+        _, bw_x_axis = cv2.threshold(cv2.cvtColor(self.x_axis_roi, cv2.COLOR_BGR2GRAY), 150, 255, cv2.THRESH_BINARY)
+        _, bw_y_axis = cv2.threshold(cv2.cvtColor(self.y_axis_roi, cv2.COLOR_BGR2GRAY), 150, 255, cv2.THRESH_BINARY)
         # check for ticks below the X-axis
-        x_ticks = self.get_ticks_indexes(bw_x_axis[int(self.axis_margin * 1.7)])
+        x_ticks = self.get_ticks_indexes(bw_x_axis[int(self.axis_margin * 1.4)])
         # if not found, check above the X-axis
         if not x_ticks:
             x_ticks = self.get_ticks_indexes(bw_x_axis[int(self.axis_margin * 0.7)])
@@ -67,10 +76,10 @@ class GraphReader:
 
         # check for ticks left of the Y-axis
         print("y index", int(self.axis_margin * 1.3))
-        y_ticks = self.get_ticks_indexes(bw_y_axis[:, -int(self.axis_margin * 1.7)])
+        y_ticks = self.get_ticks_indexes(bw_y_axis[:, -int(self.axis_margin * 1.4)])
         # if not found, check right of the Y-axis
         if not y_ticks:
-            print('not found left')
+            print("not found left")
             y_ticks = self.get_ticks_indexes(bw_y_axis[:, -int(self.axis_margin * 0.7)])
         if not y_ticks:
             raise RuntimeError("No ticks could be detected around the Y-axis, cannot compute the scale of the graph")
@@ -90,19 +99,22 @@ class GraphReader:
         return grouped_matches
 
     def detect_x_values(self):
-        scaling_ratio = 2
+        scaling_ratio = 3
         bigger = cv2.resize(self.x_axis_roi, np.array(self.x_axis_roi.shape[:2][::-1]) * scaling_ratio)
+        bigger = cv2.erode(bigger, None, iterations=2)
+        bigger = cv2.dilate(bigger, None, iterations=1)
         boxes = pytesseract.image_to_data(bigger, output_type=Output.DICT, config="--psm 6 digits")
-        x_axis_values, _ = self.process_tesseract_result(boxes, scaling_ratio)
+        x_axis_values, _ = self.process_tesseract_result(boxes, scaling_ratio, y_axis=False)
         return x_axis_values
 
     def detect_y_values(self):
-        scaling_ratio = 2
+        scaling_ratio = 3
         bigger = cv2.resize(self.y_axis_roi, np.array(self.y_axis_roi.shape[:2][::-1]) * scaling_ratio)
         # TODO vertical text is an issue, not sure how to remove it. Fixed value here is just working for this example
-        # boxes = pytesseract.image_to_data(bigger[:, 55:], output_type=Output.DICT, config="--psm 6 digits")
-        boxes = pytesseract.image_to_data(bigger[:, :], output_type=Output.DICT, config="--psm 6 digits")
-        y_axis_values, _ = self.process_tesseract_result(boxes, scaling_ratio)
+        bigger = cv2.erode(bigger, None, iterations=2)
+        bigger = cv2.dilate(bigger, None, iterations=1)
+        boxes = pytesseract.image_to_data(bigger[:, :], output_type=Output.DICT, config="--psm 6")
+        y_axis_values, _ = self.process_tesseract_result(boxes, scaling_ratio, y_axis=True)
         return y_axis_values
 
     def match_values_to_ticks(self):
@@ -118,9 +130,10 @@ class GraphReader:
             self.y_axis_matching[val["value"]] = min(y_ticks, key=lambda x: abs(x - val["center_y"]))
 
     @staticmethod
-    def process_tesseract_result(boxes, scaling_ratio):
+    def process_tesseract_result(boxes, scaling_ratio, y_axis=False):
         legend = []
         axis_values = []
+        right_align = 0
 
         for txt, left, top, width, height in zip(
             boxes["text"], boxes["left"], boxes["top"], boxes["width"], boxes["height"]
@@ -134,8 +147,11 @@ class GraphReader:
                         "value": float(txt),
                         "center_x": (left + width / 2) / scaling_ratio,
                         "center_y": (top + height / 2) / scaling_ratio,
+                        "right": left + width,
                     }
                 )
+                if left + width > right_align:
+                    right_align = left + width
             else:
                 # print("legend", txt)
                 legend.append(
@@ -145,6 +161,11 @@ class GraphReader:
                         "center_y": (top + height / 2) / scaling_ratio,
                     }
                 )
+        
+        # Keep only numbers detected close to the Y-axis
+        if y_axis:
+            axis_values = [x for x in axis_values if x["right"]> right_align-10]
+
         return axis_values, legend
 
     def compute_bg_index(self):
