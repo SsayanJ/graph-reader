@@ -1,4 +1,4 @@
-opencv-python
+opencv-python-headless
 numpy
 matplotlib
 scikit-learn
@@ -6,4 +6,3 @@ Pillow
 pandas
 streamlit
 pytesseract
-uvicorn
