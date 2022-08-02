@@ -10,7 +10,10 @@ from pytesseract.pytesseract import Output
 
 from utils import is_number
 
-pytesseract.pytesseract.tesseract_cmd = "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+# Local Tesseract
+# pytesseract.pytesseract.tesseract_cmd = "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+# Heroku app
+pytesseract.pytesseract.tesseract_cmd = "/app/.apt/usr/bin/tesseract"
 
 logger = Logger("Graph Reader", level="DEBUG")
 
@@ -65,7 +68,7 @@ class GraphReader:
         fig = plt.figure()
         for x, y, color in zip(self.x_points, self.y_points, self.curves_color):
             # Matplotlib needs the color in RGB between 0-1
-            plt.scatter(x, y, color=color[::-1] / 255, s=4)
+            plt.scatter(x, y, color=color / 255, s=4)
         # Draw the figure
         fig.canvas.draw()
         # Now we can save it to a numpy array.
