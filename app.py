@@ -3,6 +3,7 @@ To run the app
 $ streamlit run app.py
 """
 
+from cv2 import COLOR_RGB2BGR
 from pandas.core.frame import DataFrame
 import streamlit as st
 import pandas as pd
@@ -61,7 +62,9 @@ nb_sample_points = int(st.number_input(label="How many sample points?", min_valu
 graph_file = st.file_uploader("Import your graph (jpg, jpeg or png)")
 
 if graph_file and automatic_detection == "Automatic":
-    graph = cv2.imread(graph_file.getvalue())
+    graph = np.array(Image.open(graph_file))
+    # Convert to BGR as the graph reader expect OpenCV BGR format
+    graph = cv2.cvtColor(graph, COLOR_RGB2BGR)
     graph_reader.from_image(graph, nb_points=nb_sample_points, automatic_scale=True)
     display_result(graph_reader, graph)
 

@@ -11,9 +11,9 @@ from pytesseract.pytesseract import Output
 from utils import is_number
 
 # Local Tesseract
-# pytesseract.pytesseract.tesseract_cmd = "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 # Heroku app
-pytesseract.pytesseract.tesseract_cmd = "/app/.apt/usr/bin/tesseract"
+# pytesseract.pytesseract.tesseract_cmd = "/app/.apt/usr/bin/tesseract"
 
 logger = Logger("Graph Reader", level="DEBUG")
 
