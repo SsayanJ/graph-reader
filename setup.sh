@@ -1,3 +1,4 @@
+pip install -r requirements.txt
 mkdir -p ~/.streamlit/
 echo "\
 [server]\n\
